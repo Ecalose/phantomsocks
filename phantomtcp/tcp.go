@@ -111,7 +111,7 @@ func (outbound *Outbound) hasIPv6() bool {
 		addrs, _ := iface.Addrs()
 		for _, addr := range addrs {
 			if ipnet, ok := addr.(*net.IPNet); ok {
-				if ipnet.IP.To4() == nil && !ipnet.IP.IsPrivate() {
+				if ipnet.IP.To4() == nil && !ipnet.IP.IsLinkLocalUnicast() {
 					return true
 				}
 			}
