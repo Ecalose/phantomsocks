@@ -1,13 +1,13 @@
 package phantomtcp
 
 import (
+	"crypto/rand"
 	"io"
+	mathrand "math/rand"
 	"net"
 	"os"
-	"crypto/rand"
 	"strconv"
 	"syscall"
-	mathrand "math/rand"
 )
 
 const domainBytes = "abcdefghijklmnopqrstuvwxyz0123456789-"
@@ -73,7 +73,7 @@ func GetLocalTCPAddr(name string, ipv6 bool) (*net.TCPAddr, error) {
 			var laddr *net.TCPAddr
 			ip4 := localAddr.IP.To4()
 			if ipv6 {
-				if ip4 != nil || localAddr.IP.IsPrivate() {
+				if ip4 != nil || localAddr.IP.IsLinkLocalUnicast() {
 					continue
 				}
 				ip := make([]byte, 16)
@@ -93,6 +93,31 @@ func GetLocalTCPAddr(name string, ipv6 bool) (*net.TCPAddr, error) {
 	}
 
 	return nil, nil
+}
+
+func (outbound *Outbound) hasIPv6() bool {
+	if outbound.Device != "" {
+		addr, _ := GetLocalTCPAddr(outbound.Device, true)
+		return addr != nil
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, _ := iface.Addrs()
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok {
+				if ipnet.IP.To4() == nil && !ipnet.IP.IsPrivate() {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (outbound *Outbound) GetRemoteAddresses(host string, port int) ([]*net.TCPAddr, error) {
