@@ -1089,9 +1089,9 @@ func GetDNSLie(index int) (string, *Outbound) {
 
 func (outbound *Outbound) NSLookup(name string) (uint32, []net.IP) {
 	hint := outbound.Hint
+	dual := hint&HINT_IPV6 == 0 && hint&HINT_IPV4 == 0
 	var qtype uint16 = 1
-	dualQuery := hint&HINT_IPV6 != 0
-	if dualQuery {
+	if hint&HINT_IPV6 != 0 {
 		qtype = 28
 	}
 
@@ -1116,23 +1116,30 @@ func (outbound *Outbound) NSLookup(name string) (uint32, []net.IP) {
 			offset++
 		}
 	}
-	switch qtype {
-	case 1:
-		if records.IPv4Hint != nil {
-			logPrintln(3, "cached:", name, qtype, records.IPv4Hint.Addresses)
-			return records.Index, records.IPv4Hint.Addresses
-		}
-	case 28:
+	if dual {
 		if records.IPv6Hint != nil && len(records.IPv6Hint.Addresses) > 0 {
 			logPrintln(3, "cached:", name, qtype, records.IPv6Hint.Addresses)
 			return records.Index, records.IPv6Hint.Addresses
 		}
 		if records.IPv4Hint != nil {
-			logPrintln(3, "cached:", name, 1, records.IPv4Hint.Addresses)
+			logPrintln(3, "cached:", name, qtype, records.IPv4Hint.Addresses)
 			return records.Index, records.IPv4Hint.Addresses
 		}
-	default:
-		return 0, nil
+	} else {
+		switch qtype {
+		case 1:
+			if records.IPv4Hint != nil {
+				logPrintln(3, "cached:", name, qtype, records.IPv4Hint.Addresses)
+				return records.Index, records.IPv4Hint.Addresses
+			}
+		case 28:
+			if records.IPv6Hint != nil {
+				logPrintln(3, "cached:", name, qtype, records.IPv6Hint.Addresses)
+				return records.Index, records.IPv6Hint.Addresses
+			}
+		default:
+			return 0, nil
+		}
 	}
 
 	var request []byte
@@ -1157,7 +1164,7 @@ func (outbound *Outbound) NSLookup(name string) (uint32, []net.IP) {
 	}
 
 	if u.Host != "" {
-		if dualQuery {
+		if dual {
 			done := make(chan struct{}, 1)
 			request := PackRequest(_name, 1, uint16(0), options.ECS, options.QType2)
 			request6 := PackRequest(_name, 28, uint16(0), options.ECS, options.QType2)
@@ -1209,7 +1216,7 @@ func (outbound *Outbound) NSLookup(name string) (uint32, []net.IP) {
 	}
 	if err != nil {
 		logPrintln(1, err)
-		if !dualQuery {
+		if !dual {
 			return 0, nil
 		}
 	}
@@ -1229,6 +1236,36 @@ func (outbound *Outbound) NSLookup(name string) (uint32, []net.IP) {
 	records.GetAnswers(response6, options)
 	DNSRecordMutex.Lock()
 	defer DNSRecordMutex.Unlock()
+
+	if dual {
+		if records.IPv6Hint == nil && options.Fallback != nil {
+			if options.Fallback.To4() == nil {
+				records.IPv6Hint = &RecordAddresses{0, []net.IP{options.Fallback}}
+			}
+		}
+		if records.IPv6Hint == nil {
+			records.IPv6Hint = &RecordAddresses{0, []net.IP{}}
+		}
+		logPrintln(3, "nslookup", name, 28, records.IPv6Hint.Addresses)
+		if len(records.IPv6Hint.Addresses) > 0 {
+			addresses := make([]net.IP, len(records.IPv6Hint.Addresses))
+			copy(addresses, records.IPv6Hint.Addresses)
+			return records.Index, addresses
+		}
+		if records.IPv4Hint == nil && options.Fallback != nil {
+			if options.Fallback.To4() != nil {
+				logPrintln(4, "request:", name, "fallback", options.Fallback)
+				records.IPv4Hint = &RecordAddresses{0, []net.IP{options.Fallback}}
+			}
+		}
+		if records.IPv4Hint == nil {
+			records.IPv4Hint = &RecordAddresses{0, []net.IP{}}
+		}
+		logPrintln(3, "nslookup", name, 1, records.IPv4Hint.Addresses)
+		addresses := make([]net.IP, len(records.IPv4Hint.Addresses))
+		copy(addresses, records.IPv4Hint.Addresses)
+		return records.Index, addresses
+	}
 
 	switch qtype {
 	case 1:
@@ -1255,23 +1292,8 @@ func (outbound *Outbound) NSLookup(name string) (uint32, []net.IP) {
 			records.IPv6Hint = &RecordAddresses{0, []net.IP{}}
 		}
 		logPrintln(3, "nslookup", name, qtype, records.IPv6Hint.Addresses)
-		if len(records.IPv6Hint.Addresses) > 0 {
-			addresses := make([]net.IP, len(records.IPv6Hint.Addresses))
-			copy(addresses, records.IPv6Hint.Addresses)
-			return records.Index, addresses
-		}
-		if records.IPv4Hint == nil && options.Fallback != nil {
-			if options.Fallback.To4() != nil {
-				logPrintln(4, "request:", name, "fallback", options.Fallback)
-				records.IPv4Hint = &RecordAddresses{0, []net.IP{options.Fallback}}
-			}
-		}
-		if records.IPv4Hint == nil {
-			records.IPv4Hint = &RecordAddresses{0, []net.IP{}}
-		}
-		logPrintln(3, "nslookup", name, 1, records.IPv4Hint.Addresses)
-		addresses := make([]net.IP, len(records.IPv4Hint.Addresses))
-		copy(addresses, records.IPv4Hint.Addresses)
+		addresses := make([]net.IP, len(records.IPv6Hint.Addresses))
+		copy(addresses, records.IPv6Hint.Addresses)
 		return records.Index, addresses
 	}
 
