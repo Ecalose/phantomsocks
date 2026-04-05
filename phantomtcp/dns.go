@@ -1089,7 +1089,7 @@ func GetDNSLie(index int) (string, *Outbound) {
 
 func (outbound *Outbound) NSLookup(name string) (uint32, []net.IP) {
 	hint := outbound.Hint
-	dual := outbound.hasIPv6() && hint&HINT_IPV6 == 0 && hint&HINT_IPV4 == 0
+	dual := outbound.Protocol != NAT64 && outbound.hasIPv6() && hint&HINT_IPV6 == 0 && hint&HINT_IPV4 == 0
 	var qtype uint16 = 1
 	if hint&HINT_IPV6 != 0 {
 		qtype = 28
