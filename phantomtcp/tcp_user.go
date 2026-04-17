@@ -28,7 +28,6 @@ var HintMap = map[string]uint32{
 	"tfo": 	HINT_TFO,
 	"oob": 	HINT_OOB,
 	"ttl": 	HINT_TTL,
-	"wmd5": HINT_WMD5,
 
 	"udp":    HINT_UDP,
 	"no-tcp": HINT_NOTCP,
@@ -52,6 +51,10 @@ func (outbound *Outbound) dial(host string, port int, header []byte, offset int,
 	keepalive := hint&HINT_KEEPALIVE != 0
 	timeout := time.Millisecond * time.Duration(outbound.Timeout)
 	headerLen := len(header)
+	if length == 0 {
+		logPrintln(3, offset, length, headerLen)
+		hint = 0
+	}
 
 	var raddr *net.TCPAddr = nil
 	var laddr *net.TCPAddr = nil
@@ -104,7 +107,7 @@ func (outbound *Outbound) dial(host string, port int, header []byte, offset int,
 		TFOLen := headerLen
 		if hint&(HINT_TCPFRAG) != 0 {
 			TFOLen = offset + length/2
-		}
+		} 
 
 		if TFOLen > 1220 {
 			TFOLen = 1220
@@ -125,8 +128,8 @@ func (outbound *Outbound) dial(host string, port int, header []byte, offset int,
 		cut := offset + length/2
 		if hint&(HINT_TTL) != 0 {
 			oob := []byte{0}
-			err = SendWithOption(conn, header[:offset], header[offset:offset+1], 0, int(outbound.TTL))
-			err = SendWithOption(conn, header[offset+1:cut], oob, 0, 64)
+			err = SendWithOption(conn, header[:offset], header[offset:offset+2], 0, int(outbound.TTL))
+			err = SendWithOption(conn, header[offset+2:cut], oob, 0, 64)
 			SegOffset = cut
 		} else if hint&(HINT_TCPFRAG) != 0 {
 			oob := [2]byte{header[offset], 0}
@@ -135,9 +138,9 @@ func (outbound *Outbound) dial(host string, port int, header []byte, offset int,
 			err = SendWithOption(conn, header[1:offset], oob[:], 0, 0)
 			SegOffset = offset + 1
 		} else {
-			oob := [2]byte{header[2], 0}
-			err = SendWithOption(conn, header[:2], oob[:], 0, 0)
-			SegOffset = 3
+			oob := [2]byte{header[1], 0}
+			err = SendWithOption(conn, header[:1], oob[:], 0, 0)
+			SegOffset = 2
 		}
 
 		if err == nil {
@@ -145,7 +148,7 @@ func (outbound *Outbound) dial(host string, port int, header []byte, offset int,
 		}
 
 		return conn, nil, err
-	} else if hint & (HINT_TTL|HINT_WMD5) != 0 {
+	} else if hint & HINT_TTL != 0 {
 		fakepayload, cut := outbound.GetFakePayload(header, offset, length) 
 		fakepaylen := len(fakepayload)
 		if fakepaylen > cut {
@@ -166,14 +169,18 @@ func (outbound *Outbound) dial(host string, port int, header []byte, offset int,
 		SegOffset := 0
 		cut := offset + length/2
 		if cut > 4 {
-			if _, err = conn.Write(header[:1]); err == nil {	
-				_, err = conn.Write(header[1:4])
+			if err = SendWithOption(conn, header[:1], nil, mathrand.Int(), 0); err == nil {
+				err = SendWithOption(conn, header[1:4], nil, mathrand.Int(), 0)
 			}
 			SegOffset += 4
 		}
 
 		if err == nil {
-			_, err = conn.Write(header[SegOffset:])
+			err = SendWithOption(conn, header[SegOffset:cut], nil, mathrand.Int(), 0)
+		}
+
+		if err == nil {
+			err = SendWithOption(conn, header[cut:], nil, mathrand.Int(), 0)
 		}
 
 		return conn, nil, err

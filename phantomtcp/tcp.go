@@ -70,25 +70,18 @@ func GetLocalTCPAddr(name string, ipv6 bool) (*net.TCPAddr, error) {
 	for _, addr := range addrs {
 		localAddr, ok := addr.(*net.IPNet)
 		if ok {
-			var laddr *net.TCPAddr
 			ip4 := localAddr.IP.To4()
 			if ipv6 {
-				if ip4 != nil || localAddr.IP.IsPrivate() {
-					continue
+				if ip4 == nil && !localAddr.IP.IsPrivate() || localAddr.IP[0] != 0xfe {
+					ip := make([]byte, 16)
+					copy(ip[:16], localAddr.IP)
+					return &net.TCPAddr{IP: ip[:], Port: 0}, nil
 				}
-				ip := make([]byte, 16)
-				copy(ip[:16], localAddr.IP)
-				laddr = &net.TCPAddr{IP: ip[:], Port: 0}
-			} else {
-				if ip4 == nil {
-					continue
-				}
+			} else if ip4 != nil {
 				ip := make([]byte, 4)
 				copy(ip[:4], ip4)
-				laddr = &net.TCPAddr{IP: ip[:], Port: 0}
+				return &net.TCPAddr{IP: ip[:], Port: 0}, nil
 			}
-
-			return laddr, nil
 		}
 	}
 
