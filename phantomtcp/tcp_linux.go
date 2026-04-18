@@ -8,8 +8,8 @@ import (
 	"time"
 	"unsafe"
 
-	"golang.org/x/sys/unix"
 	"github.com/macronut/go-tproxy"
+	"golang.org/x/sys/unix"
 )
 
 func DialWithOption(laddr, raddr *net.TCPAddr, ttl, mss int, tcpfastopen, keepalive bool, timeout time.Duration) (net.Conn, error) {
@@ -31,6 +31,8 @@ func DialWithOption(laddr, raddr *net.TCPAddr, ttl, mss int, tcpfastopen, keepal
 				if keepalive {
 					syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_KEEPALIVE, 1)
 				}
+
+				syscall.SetNonblock(int(fd), true)
 			})
 			return err
 		}}
@@ -45,11 +47,11 @@ func DialConnInfo(laddr, raddr *net.TCPAddr, outbound *Outbound, payload []byte)
 	AddConn(addr, outbound.Hint)
 
 	conn, err := DialWithOption(
-		laddr, raddr, 
-		int(outbound.MaxTTL), int(outbound.MTU), 
-		(outbound.Hint & HINT_TFO) != 0, (outbound.Hint & HINT_KEEPALIVE) != 0, 
+		laddr, raddr,
+		int(outbound.MaxTTL), int(outbound.MTU),
+		(outbound.Hint&HINT_TFO) != 0, (outbound.Hint&HINT_KEEPALIVE) != 0,
 		timeout)
-		
+
 	if err != nil {
 		DelConn(raddr.String())
 		return nil, nil, err
@@ -163,21 +165,35 @@ func SendWithOption(conn net.Conn, payload, oob []byte, tos int, ttl int) error 
 	defer f.Close()
 	fd := int(f.Fd())
 
-	syscall.SetNonblock(fd, true)
+	sa, err := syscall.Getsockname(fd)
+	opt := 0
+	ttl_value := 0
+	tos_value := 0
 
-	if tos != 0 {
-		err = syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_TOS, tos)
-		if err != nil {
-			return err
-		}
+	switch sa.(type) {
+	case *syscall.SockaddrInet4:
+		opt = syscall.IPPROTO_IP
+		ttl_value = syscall.IP_TTL
+		tos_value = syscall.IP_TOS
+	case *syscall.SockaddrInet6:
+		opt = syscall.IPPROTO_IPV6
+		ttl_value = syscall.IPV6_UNICAST_HOPS
+		tos_value = syscall.IPV6_TCLASS
 	}
 
-	if ttl != 0 {
-		err = syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_TTL, ttl)
-		if err != nil {
-			return err
-		}
+	if err == nil && tos != 0 {
+		err = syscall.SetsockoptInt(fd, opt, tos_value, tos)
 	}
+
+	if err == nil && ttl != 0 {
+		err = syscall.SetsockoptInt(fd, opt, ttl_value, ttl)
+	}
+
+	if err != nil {
+		return err
+	}
+
+	syscall.SetNonblock(fd, false)
 
 	if oob != nil {
 		buf := make([]byte, len(payload)+1)
@@ -191,22 +207,18 @@ func SendWithOption(conn net.Conn, payload, oob []byte, tos int, ttl int) error 
 		_, err = conn.Write(payload)
 	}
 
+	syscall.SetNonblock(fd, true)
+
+	if err == nil && tos != 0 {
+		err = syscall.SetsockoptInt(fd, opt, tos_value, 0)
+	}
+
+	if err == nil && ttl != 0 {
+		err = syscall.SetsockoptInt(fd, opt, ttl_value, 64)
+	}
+
 	if err != nil {
 		return err
-	}
-
-	if tos != 0 {
-		err = syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_TOS, 0)
-		if err != nil {
-			return err
-		}
-	}
-
-	if ttl != 0 {
-		err = syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_TTL, 64)
-		if err != nil {
-			return err
-		}
 	}
 
 	return nil
@@ -240,7 +252,7 @@ func SetsockoptTCPMD5Sig(fd uintptr, s *unix.TCPMD5Sig) error {
 	return nil
 }
 
-func (outbound *Outbound)SendWithFakePayload(conn net.Conn, fakepayload, realpayload []byte) error {
+func (outbound *Outbound) SendWithFakePayload(conn net.Conn, fakepayload, realpayload []byte) error {
 	fakepaylen := len(fakepayload)
 	f, err := conn.(*net.TCPConn).File()
 	if err != nil {
@@ -257,7 +269,7 @@ func (outbound *Outbound)SendWithFakePayload(conn net.Conn, fakepayload, realpay
 	defer unix.Close(pipeFds[1])
 	logPrintln(2, "pipe creation success", pipeFds[0], pipeFds[1])
 
-	mmapLen := ((fakepaylen - 1) / 4 + 1) * 4
+	mmapLen := ((fakepaylen-1)/4 + 1) * 4
 	mmapBuf, err := unix.Mmap(
 		-1, 0, mmapLen,
 		unix.PROT_READ|unix.PROT_WRITE,
@@ -268,23 +280,31 @@ func (outbound *Outbound)SendWithFakePayload(conn net.Conn, fakepayload, realpay
 	}
 	defer unix.Munmap(mmapBuf)
 	copy(mmapBuf, fakepayload)
-	
-	if outbound.Hint & HINT_TTL != 0 {
-		if err := unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_TTL, int(outbound.TTL)); err != nil {
-			return fmt.Errorf("set fake TTL failed: %w", err)
-		}
+
+	sa, err := syscall.Getsockname(int(fd))
+	opt := 0
+	value := 0
+	ttl := int(outbound.TTL)
+
+	switch sa.(type) {
+	case *syscall.SockaddrInet4:
+		opt = syscall.IPPROTO_IP
+		value = syscall.IP_TTL
+	case *syscall.SockaddrInet6:
+		opt = syscall.IPPROTO_IPV6
+		value = syscall.IPV6_UNICAST_HOPS
 	}
-	if outbound.Hint & HINT_WMD5 != 0 {
-		tcpMD5Sig := unix.TCPMD5Sig{}
-		if err := SetsockoptTCPMD5Sig(fd, &tcpMD5Sig); err != nil {
-			return fmt.Errorf("set MD5 failed: %w", err)
+
+	if outbound.Hint&HINT_TTL != 0 {
+		if err := unix.SetsockoptInt(int(fd), opt, value, ttl); err != nil {
+			return fmt.Errorf("set fake TTL failed: %w", err)
 		}
 	}
 
 	iov := unix.Iovec{Base: &mmapBuf[0]}
 	iov.SetLen(fakepaylen)
 
-	_, _, errno := unix.Syscall6(unix.SYS_VMSPLICE, uintptr(pipeFds[1]),  uintptr(unsafe.Pointer(&iov)),  1,  2,  0, 0)
+	_, _, errno := unix.Syscall6(unix.SYS_VMSPLICE, uintptr(pipeFds[1]), uintptr(unsafe.Pointer(&iov)), 1, 2, 0, 0)
 	if errno != 0 {
 		return fmt.Errorf("vmsplice failed: %w", errno)
 	}
@@ -296,15 +316,9 @@ func (outbound *Outbound)SendWithFakePayload(conn net.Conn, fakepayload, realpay
 	time.Sleep(time.Millisecond * 80)
 	copy(mmapBuf, realpayload[:fakepaylen])
 
-	if outbound.Hint & HINT_TTL != 0 {
-		if err := unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_TTL, 64); err != nil {
+	if outbound.Hint&HINT_TTL != 0 {
+		if err := unix.SetsockoptInt(int(fd), opt, value, 64); err != nil {
 			return fmt.Errorf("set default TTL failed: %w", err)
-		}
-	}
-	if outbound.Hint & HINT_WMD5 != 0 {
-		tcpMD5Sig := unix.TCPMD5Sig{}
-		if err := SetsockoptTCPMD5Sig(fd, &tcpMD5Sig); err != nil {
-			return fmt.Errorf("remove MD5 failed: %w", err)
 		}
 	}
 

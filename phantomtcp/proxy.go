@@ -9,6 +9,7 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -108,12 +109,7 @@ func HTTPProxy(client net.Conn) {
 
 	if method == "CONNECT" {
 		fmt.Fprint(client, "HTTP/1.1 200 Connection established\r\n\r\n")
-		n, err = client.Read(b[:])
-		if err != nil {
-			logPrintln(1, err)
-			return
-		}
-		tcp_redirect(client, &net.TCPAddr{Port: port}, host, b[:n])
+		tcp_redirect(client, &net.TCPAddr{Port: port}, host, nil)
 		return
 	} else {
 		if strings.HasPrefix(host, "http://") {
@@ -295,33 +291,51 @@ func tcp_redirect(client net.Conn, addr *net.TCPAddr, domain string, header []by
 					}
 				}
 
+				retry := 5
+
+				CONNECT:
 				logPrintln(1, "Redirect:", client.RemoteAddr(), "->", domain, port, outbound.Device, time.Since(start_time))
 
 				conn, _, err = outbound.dial(domain, port, header, offset, length)
 				if err == nil {
 					var server_hello [4096]byte
 					var helloLen int
-					err = conn.SetReadDeadline(time.Now().Add(time.Millisecond * time.Duration(outbound.Timeout)))
+					if outbound.Timeout > 0 {
+						err = conn.SetReadDeadline(time.Now().Add(time.Millisecond * time.Duration(outbound.Timeout)))
+					}
+
 					if err == nil {
 						helloLen, err = conn.Read(server_hello[:])
 					}
+
+					if (outbound.Hint&HINT_OOB != 0) && retry > 0 {
+						retry--
+						if os.IsTimeout(err) {
+							conn.Close()
+							goto CONNECT
+						} else if (helloLen > 5 && server_hello[0] == 0x15) {
+							alert_ver := binary.BigEndian.Uint16(server_hello[1:3])
+							logPrintln(2, "Alert", GetTLSVersionString(alert_ver))
+							conn.Close()
+							goto CONNECT
+						}
+					}
+
 					if err == nil {
-						conn.SetReadDeadline(time.Time{})
-						_, err := client.Write(server_hello[:helloLen])
-						if err != nil {
+						if _, err = client.Write(server_hello[:helloLen]); err != nil {
 							logPrintln(2, domain, err)
 							return
 						}
 					}
-				}
 
-				if err != nil && outbound.Fallback != nil {
-					outbound = outbound.Fallback
-					logPrintln(1, "Redirect:", client.RemoteAddr(), "->", domain, port, outbound.Device, time.Since(start_time))
-					conn, _, err = outbound.dial(domain, port, header, offset, length)
+					conn.SetReadDeadline(time.Time{})
 				}
-
+				
 				if err != nil {
+					if outbound.Fallback != nil {
+						outbound = outbound.Fallback
+						goto CONNECT
+					}
 					logPrintln(2, domain, err)
 					return
 				}
