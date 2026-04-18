@@ -1164,54 +1164,36 @@ func (outbound *Outbound) NSLookup(name string) (uint32, []net.IP) {
 	}
 
 	if u.Host != "" {
+		switch u.Scheme {
+		case "udp", "tcp", "tls", "https", "tfo":
+		default:
+			records.Index = AddDNSLie(name, outbound)
+			records.ALPN = hint
+			return records.Index, nil
+		}
+		doLookup := func(qt uint16) ([]byte, error) {
+			request = PackRequest(_name, qt, uint16(0), options.ECS, options.QType2)
+			switch u.Scheme {
+			case "udp":
+				return UDPlookup(request, u.Host)
+			case "tcp":
+				return TCPlookup(request, u.Host)
+			case "tls":
+				return TLSlookup(request, u.Host)
+			case "https":
+				return HTTPSlookup(request, u, options.Domain)
+			case "tfo":
+				return TFOlookup(request, u.Host)
+			}
+			return nil, nil
+		}
 		if dual {
 			done := make(chan struct{}, 1)
-			request := PackRequest(_name, 1, uint16(0), options.ECS, options.QType2)
-			request6 := PackRequest(_name, 28, uint16(0), options.ECS, options.QType2)
-			switch u.Scheme {
-			case "udp":
-				go func() { response6, err6 = UDPlookup(request6, u.Host); done <- struct{}{} }()
-				response, err = UDPlookup(request, u.Host)
-			case "tcp":
-				go func() { response6, err6 = TCPlookup(request6, u.Host); done <- struct{}{} }()
-				response, err = TCPlookup(request, u.Host)
-			case "tls":
-				go func() { response6, err6 = TLSlookup(request6, u.Host); done <- struct{}{} }()
-				response, err = TLSlookup(request, u.Host)
-			case "https":
-				go func() { response6, err6 = HTTPSlookup(request6, u, options.Domain); done <- struct{}{} }()
-				response, err = HTTPSlookup(request, u, options.Domain)
-			case "tfo":
-				go func() { response6, err6 = TFOlookup(request6, u.Host); done <- struct{}{} }()
-				response, err = TFOlookup(request, u.Host)
-			default:
-				records.Index = AddDNSLie(name, outbound)
-				records.ALPN = hint
-				return records.Index, nil
-			}
+			go func() { response6, err6 = doLookup(28); done <- struct{}{} }()
+			response, err = doLookup(1)
 			<-done
 		} else {
-			switch u.Scheme {
-			case "udp":
-				request = PackRequest(_name, qtype, uint16(0), options.ECS, options.QType2)
-				response, err = UDPlookup(request, u.Host)
-			case "tcp":
-				request = PackRequest(_name, qtype, uint16(0), options.ECS, options.QType2)
-				response, err = TCPlookup(request, u.Host)
-			case "tls":
-				request = PackRequest(_name, qtype, uint16(0), options.ECS, options.QType2)
-				response, err = TLSlookup(request, u.Host)
-			case "https":
-				request = PackRequest(_name, qtype, uint16(0), options.ECS, options.QType2)
-				response, err = HTTPSlookup(request, u, options.Domain)
-			case "tfo":
-				request = PackRequest(_name, qtype, uint16(0), options.ECS, options.QType2)
-				response, err = TFOlookup(request, u.Host)
-			default:
-				records.Index = AddDNSLie(name, outbound)
-				records.ALPN = hint
-				return records.Index, nil
-			}
+			response, err = doLookup(qtype)
 		}
 	}
 	if err != nil {
