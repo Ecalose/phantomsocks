@@ -1089,6 +1089,7 @@ func GetDNSLie(index int) (string, *Outbound) {
 
 func (outbound *Outbound) NSLookup(name string) (uint32, []net.IP) {
 	hint := outbound.Hint
+	dual := outbound.Protocol != NAT64 && outbound.hasIPv6() && hint&HINT_IPV6 == 0 && hint&HINT_IPV4 == 0
 	var qtype uint16 = 1
 	if hint&HINT_IPV6 != 0 {
 		qtype = 28
@@ -1115,24 +1116,37 @@ func (outbound *Outbound) NSLookup(name string) (uint32, []net.IP) {
 			offset++
 		}
 	}
-	switch qtype {
-	case 1:
+	if dual {
+		if records.IPv6Hint != nil && len(records.IPv6Hint.Addresses) > 0 {
+			logPrintln(3, "cached:", name, qtype, records.IPv6Hint.Addresses)
+			return records.Index, records.IPv6Hint.Addresses
+		}
 		if records.IPv4Hint != nil {
 			logPrintln(3, "cached:", name, qtype, records.IPv4Hint.Addresses)
 			return records.Index, records.IPv4Hint.Addresses
 		}
-	case 28:
-		if records.IPv6Hint != nil {
-			logPrintln(3, "cached:", name, qtype, records.IPv6Hint.Addresses)
-			return records.Index, records.IPv6Hint.Addresses
+	} else {
+		switch qtype {
+		case 1:
+			if records.IPv4Hint != nil {
+				logPrintln(3, "cached:", name, qtype, records.IPv4Hint.Addresses)
+				return records.Index, records.IPv4Hint.Addresses
+			}
+		case 28:
+			if records.IPv6Hint != nil {
+				logPrintln(3, "cached:", name, qtype, records.IPv6Hint.Addresses)
+				return records.Index, records.IPv6Hint.Addresses
+			}
+		default:
+			return 0, nil
 		}
-	default:
-		return 0, nil
 	}
 
 	var request []byte
 	var response []byte
 	var err error
+	var response6 []byte
+	var err6 error
 
 	var options ServerOptions
 	u, err := url.Parse(outbound.DNS)
@@ -1151,30 +1165,48 @@ func (outbound *Outbound) NSLookup(name string) (uint32, []net.IP) {
 
 	if u.Host != "" {
 		switch u.Scheme {
-		case "udp":
-			request = PackRequest(_name, qtype, uint16(0), options.ECS, options.QType2)
-			response, err = UDPlookup(request, u.Host)
-		case "tcp":
-			request = PackRequest(_name, qtype, uint16(0), options.ECS, options.QType2)
-			response, err = TCPlookup(request, u.Host)
-		case "tls":
-			request = PackRequest(_name, qtype, uint16(0), options.ECS, options.QType2)
-			response, err = TLSlookup(request, u.Host)
-		case "https":
-			request = PackRequest(_name, qtype, uint16(0), options.ECS, options.QType2)
-			response, err = HTTPSlookup(request, u, options.Domain)
-		case "tfo":
-			request = PackRequest(_name, qtype, uint16(0), options.ECS, options.QType2)
-			response, err = TFOlookup(request, u.Host)
+		case "udp", "tcp", "tls", "https", "tfo":
 		default:
 			records.Index = AddDNSLie(name, outbound)
 			records.ALPN = hint
 			return records.Index, nil
 		}
+		doLookup := func(qt uint16) ([]byte, error) {
+			request = PackRequest(_name, qt, uint16(0), options.ECS, options.QType2)
+			switch u.Scheme {
+			case "udp":
+				return UDPlookup(request, u.Host)
+			case "tcp":
+				return TCPlookup(request, u.Host)
+			case "tls":
+				return TLSlookup(request, u.Host)
+			case "https":
+				return HTTPSlookup(request, u, options.Domain)
+			case "tfo":
+				return TFOlookup(request, u.Host)
+			}
+			return nil, nil
+		}
+		if dual {
+			done := make(chan struct{}, 1)
+			go func() { response6, err6 = doLookup(28); done <- struct{}{} }()
+			response, err = doLookup(1)
+			<-done
+		} else {
+			response, err = doLookup(qtype)
+		}
 	}
 	if err != nil {
 		logPrintln(1, err)
-		return 0, nil
+		if !dual {
+			return 0, nil
+		}
+	}
+	if err6 != nil {
+		logPrintln(1, err6)
+		if err != nil {
+			return 0, nil
+		}
 	}
 
 	if (hint&HINT_FAKEIP != 0) && records.Index == 0 {
@@ -1183,8 +1215,39 @@ func (outbound *Outbound) NSLookup(name string) (uint32, []net.IP) {
 	}
 
 	records.GetAnswers(response, options)
+	records.GetAnswers(response6, options)
 	DNSRecordMutex.Lock()
 	defer DNSRecordMutex.Unlock()
+
+	if dual {
+		if records.IPv6Hint == nil && options.Fallback != nil {
+			if options.Fallback.To4() == nil {
+				records.IPv6Hint = &RecordAddresses{0, []net.IP{options.Fallback}}
+			}
+		}
+		if records.IPv6Hint == nil {
+			records.IPv6Hint = &RecordAddresses{0, []net.IP{}}
+		}
+		logPrintln(3, "nslookup", name, 28, records.IPv6Hint.Addresses)
+		if len(records.IPv6Hint.Addresses) > 0 {
+			addresses := make([]net.IP, len(records.IPv6Hint.Addresses))
+			copy(addresses, records.IPv6Hint.Addresses)
+			return records.Index, addresses
+		}
+		if records.IPv4Hint == nil && options.Fallback != nil {
+			if options.Fallback.To4() != nil {
+				logPrintln(4, "request:", name, "fallback", options.Fallback)
+				records.IPv4Hint = &RecordAddresses{0, []net.IP{options.Fallback}}
+			}
+		}
+		if records.IPv4Hint == nil {
+			records.IPv4Hint = &RecordAddresses{0, []net.IP{}}
+		}
+		logPrintln(3, "nslookup", name, 1, records.IPv4Hint.Addresses)
+		addresses := make([]net.IP, len(records.IPv4Hint.Addresses))
+		copy(addresses, records.IPv4Hint.Addresses)
+		return records.Index, addresses
+	}
 
 	switch qtype {
 	case 1:
