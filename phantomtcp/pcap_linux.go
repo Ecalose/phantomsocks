@@ -161,6 +161,8 @@ func ModifyAndSendPacket(connInfo *ConnectionInfo, payload []byte, hint uint32, 
 			laddr = net.IPAddr{ip.SrcIP, ""}
 			raddr = net.IPAddr{ip.DstIP, ""}
 			network = "ip6:tcp"
+		default:
+			return nil
 		}
 
 		conn, err := net.DialIP(network, &laddr, &raddr)
@@ -176,7 +178,11 @@ func ModifyAndSendPacket(connInfo *ConnectionInfo, payload []byte, hint uint32, 
 			}
 			defer f.Close()
 			fd := int(f.Fd())
-			err = syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_TTL, int(ttl))
+			if network == "ip6:tcp" {
+				err = syscall.SetsockoptInt(fd, syscall.IPPROTO_IPV6, syscall.IPV6_UNICAST_HOPS, int(ttl))
+			} else {
+				err = syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_TTL, int(ttl))
+			}
 			if err != nil {
 				return err
 			}
@@ -188,8 +194,7 @@ func ModifyAndSendPacket(connInfo *ConnectionInfo, payload []byte, hint uint32, 
 		)
 		outgoingPacket := buffer.Bytes()
 		for i := 0; i < count; i++ {
-			_, err = conn.Write(outgoingPacket)
-			if err != nil {
+			if _, err = conn.Write(outgoingPacket); err != nil {
 				return err
 			}
 		}
