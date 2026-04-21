@@ -455,7 +455,7 @@ func QUICProxy(address string) {
 				if outbound.Hint&HINT_UDP == 0 {
 					continue
 				}
-				_, ips := outbound.NSLookup(SNI)
+				_, ips := outbound.NSLookup(SNI, 0)
 				if ips == nil {
 					continue
 				}
@@ -566,7 +566,7 @@ func SocksUDPProxy(address string) {
 						continue
 					}
 				}
-				_, ips := outbound.NSLookup(host)
+				_, ips := outbound.NSLookup(host, 0)
 				if ips == nil {
 					continue
 				}
@@ -649,7 +649,7 @@ func Netcat(client net.Conn) {
 				if cmdlen > 1 {
 					domain := cmd[1]
 					outbound, _ := DefaultProfile.GetOutbound(domain)
-					_, addrs := outbound.NSLookup(domain)
+					_, addrs := outbound.NSLookup(domain, 0)
 					for _, addr := range addrs {
 						client.Write([]byte(addr.String() + "\n"))
 					}
@@ -844,7 +844,7 @@ func (outbound *Outbound) ProxyHandshake(conn net.Conn, synpacket *ConnectionInf
 			}
 
 			if outbound.DNS != "" {
-				_, ips := outbound.NSLookup(host)
+				_, ips := outbound.NSLookup(host, 0)
 				if ips != nil {
 					ip := ips[rand.Intn(len(ips))]
 					ip4 := ip.To4()

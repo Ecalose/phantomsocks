@@ -67,17 +67,32 @@ func GetLocalTCPAddr(name string, ipv6 bool) (*net.TCPAddr, error) {
 		return nil, err
 	}
 	addrs, _ := inf.Addrs()
-	for _, addr := range addrs {
-		localAddr, ok := addr.(*net.IPNet)
-		if ok {
-			ip4 := localAddr.IP.To4()
-			if ipv6 {
-				if ip4 == nil && !localAddr.IP.IsPrivate() || localAddr.IP[0] != 0xfe {
-					ip := make([]byte, 16)
-					copy(ip[:16], localAddr.IP)
-					return &net.TCPAddr{IP: ip[:], Port: 0}, nil
+
+	if ipv6 {
+		var addr6 *net.TCPAddr = nil
+		for _, addr := range addrs {
+			localAddr, ok := addr.(*net.IPNet)
+			if !ok || len(localAddr.IP) != 16{
+				continue
+			}
+			if localAddr.IP[0] != 0 && (localAddr.IP[0] != 0xfe && localAddr.IP[1]&0xc0 == 0x80) {
+				ip := make([]byte, 16)
+				copy(ip[:16], localAddr.IP)
+				addr6 = &net.TCPAddr{IP: ip[:], Port: 0}
+				if ip[0]&0x30 == 0x20 {
+					return addr6, nil
 				}
-			} else if ip4 != nil {
+			}
+		}
+		return addr6, nil
+	} else {
+		for _, addr := range addrs {
+			localAddr, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip4 := localAddr.IP.To4()
+			if ip4 != nil {
 				ip := make([]byte, 4)
 				copy(ip[:4], ip4)
 				return &net.TCPAddr{IP: ip[:], Port: 0}, nil
@@ -86,31 +101,6 @@ func GetLocalTCPAddr(name string, ipv6 bool) (*net.TCPAddr, error) {
 	}
 
 	return nil, nil
-}
-
-func (outbound *Outbound) hasIPv6() bool {
-	if outbound.Device != "" {
-		addr, _ := GetLocalTCPAddr(outbound.Device, true)
-		return addr != nil
-	}
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return false
-	}
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		addrs, _ := iface.Addrs()
-		for _, addr := range addrs {
-			if ipnet, ok := addr.(*net.IPNet); ok {
-				if ipnet.IP.To4() == nil && !ipnet.IP.IsLinkLocalUnicast() {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }
 
 func (outbound *Outbound) GetRemoteAddresses(host string, port int) ([]*net.TCPAddr, error) {

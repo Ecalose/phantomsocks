@@ -251,6 +251,9 @@ func StartService() {
 			fmt.Println("Reverse:", inbound.Address)
 			go ListenAndServe(inbound.Address, inbound.PrivateKey, ptcp.SNIProxy)
 			go ptcp.QUICProxy(inbound.Address)
+		case "netcat":
+			fmt.Println("netcat:", inbound.Address)
+			go ListenAndServe(inbound.Address, "", ptcp.Netcat)
 		}
 	}
 
