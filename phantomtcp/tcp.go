@@ -75,7 +75,7 @@ func GetLocalTCPAddr(name string, ipv6 bool) (*net.TCPAddr, error) {
 			if !ok || len(localAddr.IP) != 16{
 				continue
 			}
-			if localAddr.IP[0] != 0 && (localAddr.IP[0] != 0xfe && localAddr.IP[1]&0xc0 == 0x80) {
+			if localAddr.IP[0] != 0 && !localAddr.IP.IsLinkLocalUnicast() {
 				ip := make([]byte, 16)
 				copy(ip[:16], localAddr.IP)
 				addr6 = &net.TCPAddr{IP: ip[:], Port: 0}
