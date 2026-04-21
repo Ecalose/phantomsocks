@@ -1093,7 +1093,7 @@ func (outbound *Outbound) NSLookup(name string, qtype uint16) (uint32, []net.IP)
 	if qtype == 0 {
 		ipv4 := hint&HINT_IPV4 != 0
 		ipv6 := hint&HINT_IPV6 != 0
-		if (outbound.Protocol != NAT64) {
+		if (outbound.Protocol == NAT64) {
 			qtype = 1
 		} else if ipv4 == ipv6 {
 			ch := make(chan []net.IP, 1)
