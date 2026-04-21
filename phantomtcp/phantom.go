@@ -988,27 +988,28 @@ func CreateOutbounds(Outbounds []OutboundConfig) []string {
 					}
 				}
 			}
-			
-			if outbound.Device != "" && Hint&HINT_IPV4 == 0 && Hint&HINT_IPV6 == 0 {
-				ip6, _ := GetLocalTCPAddr(outbound.Device, true)
-				if ip6 != nil {
-					Hint |= HINT_IPV6
-				}
-				ip4, _ := GetLocalTCPAddr(outbound.Device, false)
-				if ip4 != nil {
-					Hint |= HINT_IPV4
-				}
-			}
-
-			if Hint&HINT_IPV4 == 0 && Hint&HINT_IPV6 == 0 {
-				Hint |= HINT_IPV4
-			}
 
 			_, ok := OutboundsMap[outbound.Device]
 			if !ok && !contains(devices, outbound.Device) {
 				devices = append(devices, outbound.Device)
 			}
 		}
+
+		if outbound.Device != "" && Hint&HINT_IPV4 == 0 && Hint&HINT_IPV6 == 0 {
+			ip6, _ := GetLocalTCPAddr(outbound.Device, true)
+			if ip6 != nil {
+				outbound.Hint |= HINT_IPV6
+			}
+			ip4, _ := GetLocalTCPAddr(outbound.Device, false)
+			if ip4 != nil {
+				outbound.Hint |= HINT_IPV4
+			}
+		}
+
+		if Hint&HINT_IPV4 == 0 && Hint&HINT_IPV6 == 0 {
+			outbound.Hint |= HINT_IPV4
+		}
+
 	}
 
 	default_outbound, ok := OutboundsMap["default"]
