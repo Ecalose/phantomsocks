@@ -2,10 +2,12 @@ package phantomtcp
 
 import (
 	"bytes"
+	//"context"
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"net"
@@ -241,81 +243,50 @@ func TLSlookup(request []byte, address string) ([]byte, error) {
 	return data[2:recvlen], nil
 }
 
-func HTTPSlookup(request []byte, u *url.URL, domain string) ([]byte, error) {
-	address := u.Host
-	host, port, err := net.SplitHostPort(address)
-	if err != nil {
-		host = address
-		port = "443"
-		address += ":443"
+func HTTPSlookup(request []byte, u *url.URL, servername string) ([]byte, error) {
+	if servername == "" {
+		host, _, err := net.SplitHostPort(u.Host)
+		if err != nil {
+			servername = host
+		} else {
+			servername = u.Host
+		}
 	}
-
-	if domain == "" {
-		domain = host
-	}
-	path := u.Path
-	if port != "443" {
-		host = address
-	}
-
-	conf := &tls.Config{
+	
+	tlsConfig := &tls.Config{
 		InsecureSkipVerify: true,
-		ServerName:         domain,
+		ServerName:         servername,
 	}
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", address, conf)
+	client := &http.Client{
+		Timeout: time.Duration(5 * time.Second),
+	}
+	client.Transport = &http.Transport{
+		TLSClientConfig: tlsConfig,
+		ForceAttemptHTTP2: true,
+	}
+
+	url := fmt.Sprintf("https://%s%s", u.Host, u.Path)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(request))
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
 
-	httpRequest := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nAccept: application/dns-message\r\nContent-Type: application/dns-message\r\nConnection: close\r\nContent-Length: %d\r\n\r\n", path, host, len(request))
-	logPrintln(5, httpRequest)
-	_, err = conn.Write([]byte(httpRequest))
-	if err != nil {
-		return nil, err
-	}
-	_, err = conn.Write(request)
+	req.Header.Add("Accept", "application/dns-message")
+	req.Header.Add("Content-Type", "application/dns-message")
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 
-	conn.SetReadDeadline(time.Now().Add(time.Second * 5))
-	data := make([]byte, 2048)
-	recvlen := 0
-	headerLen := 0
-	contentLength := 0
-	for {
-		n, err := conn.Read(data[recvlen:])
-		recvlen += n
+	defer resp.Body.Close()
 
-		if recvlen > 0 {
-			if contentLength == 0 {
-				offset := bytes.Index(data[:recvlen], []byte("\r\n\r\n"))
-				if offset != -1 {
-					headerLen = offset + 4
-					header := string(data[:headerLen])
-					logPrintln(5, header)
-					for _, line := range strings.Split(header, "\r\n") {
-						field := strings.SplitN(line, ": ", 2)
-						if len(field) > 1 {
-							if field[0] == "Content-Length" {
-								contentLength, err = strconv.Atoi(field[1])
-								continue
-							}
-						}
-					}
-				}
-			}
-
-			if (recvlen - headerLen) >= contentLength {
-				return data[headerLen : headerLen+contentLength], nil
-			}
-		}
-
-		if err != nil || n == 0 {
-			return nil, err
-		}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
 	}
+
+	return body, nil
 }
 
 func TFOlookup(request []byte, address string) ([]byte, error) {
@@ -1093,7 +1064,7 @@ func (outbound *Outbound) NSLookup(name string, qtype uint16) (uint32, []net.IP)
 	if qtype == 0 {
 		ipv4 := hint&HINT_IPV4 != 0
 		ipv6 := hint&HINT_IPV6 != 0
-		if (outbound.Protocol == NAT64) {
+		if (outbound.Protocol != NAT64) {
 			qtype = 1
 		} else if ipv4 == ipv6 {
 			ch := make(chan []net.IP, 1)
