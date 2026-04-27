@@ -5,6 +5,7 @@ package phantomtcp
 import (
 	"net"
 	"syscall"
+	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
