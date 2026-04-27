@@ -3,14 +3,14 @@
 package phantomtcp
 
 import (
-	"fmt"
+	"encoding/binary"
 	"net"
-	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
+	"golang.org/x/sys/unix"
 )
 
 var HintMap = map[string]uint32{
@@ -35,6 +35,7 @@ var HintMap = map[string]uint32{
 	"w-ack":  HINT_WACK,
 	"w-csum": HINT_WCSUM,
 	"w-seq":  HINT_WSEQ,
+	"w-time": HINT_WTIME,
 	"oob":    HINT_OOB,
 
 	"tfo":    HINT_TFO,
@@ -53,222 +54,8 @@ var HintMap = map[string]uint32{
 	"zero":       HINT_ZERO,
 }
 
-func connectionMonitor(device string, ipv6 bool) {
-	localaddr, err := GetLocalTCPAddr(device, ipv6)
-	if err != nil {
-		logPrintln(1, device, err)
-		return
-	}
-
-	var handle *net.IPConn
-	if ipv6 {
-		if localaddr == nil {
-			logPrintln(1, "Device:", device, "no IPv6")
-			return
-		}
-		handle, err = net.ListenIP("ip6:tcp", &net.IPAddr{IP: localaddr.IP, Zone: ""})
-	} else {
-		if localaddr == nil {
-			logPrintln(1, "Device:", device, "no IPv4")
-			return
-		}
-		handle, err = net.ListenIP("ip4:tcp", &net.IPAddr{IP: localaddr.IP, Zone: ""})
-	}
-
-	fmt.Printf("Device: %v (%s)\n", device, localaddr.IP.String())
-
-	if err != nil {
-		fmt.Printf("sockraw open failed: %v", err)
-		return
-	}
-	defer handle.Close()
-
-	buf := make([]byte, 1500)
-	for {
-		n, addr, err := handle.ReadFrom(buf)
-		if err != nil {
-			logPrintln(1, err)
-			continue
-		}
-		if buf[13] != 18 {
-			continue
-		}
-
-		var tcp layers.TCP
-		tcp.DecodeFromBytes(buf[:n], gopacket.NilDecodeFeedback)
-		srcPort := tcp.DstPort
-		synAddr := net.JoinHostPort(addr.String(), strconv.Itoa(int(tcp.SrcPort)))
-		_, ok := ConnSyn.Load(synAddr)
-		if ok {
-			if ipv6 {
-				var ip layers.IPv6
-				ip.Version = 6
-				ip.TrafficClass = 5
-				ip.FlowLabel = 0
-				ip.Length = 0
-				ip.NextHeader = 6
-				ip.HopLimit = 64
-				ip.SrcIP = localaddr.IP
-				ip.DstIP = net.ParseIP(addr.String())
-				ip.HopByHop = nil
-
-				tcp.DstPort = tcp.SrcPort
-				tcp.SrcPort = srcPort
-				ack := tcp.Seq + 1
-				tcp.Seq = tcp.Ack - 1
-				tcp.Ack = ack
-
-				ch := ConnInfo6[srcPort]
-				connInfo := ConnectionInfo{nil, &ip, tcp}
-				go func(info *ConnectionInfo) {
-					select {
-					case ch <- info:
-					case <-time.After(time.Second * 2):
-					}
-				}(&connInfo)
-
-				buf = make([]byte, 1500)
-			} else {
-				var ip layers.IPv4
-				ip.Version = 4
-				ip.IHL = 5
-				ip.TOS = 0
-				ip.Length = 0
-				ip.Id = 0
-				ip.Flags = 0
-				ip.FragOffset = 0
-				ip.TTL = 64
-				ip.Protocol = 6
-				ip.Checksum = 0
-				ip.SrcIP = localaddr.IP
-				ip.DstIP = net.ParseIP(addr.String())
-				ip.Options = nil
-				ip.Padding = nil
-
-				tcp.DstPort = tcp.SrcPort
-				tcp.SrcPort = srcPort
-				ack := tcp.Seq + 1
-				tcp.Seq = tcp.Ack - 1
-				tcp.Ack = ack
-
-				ch := ConnInfo4[srcPort]
-				connInfo := ConnectionInfo{nil, &ip, tcp}
-				go func(info *ConnectionInfo) {
-					select {
-					case ch <- info:
-					case <-time.After(time.Second * 2):
-					}
-				}(&connInfo)
-
-				buf = make([]byte, 1500)
-			}
-		}
-	}
-}
-
-func ICMPMonitor(device string, ipv6 bool) {
-	fmt.Printf("Device: %v\n", device)
-
-	var err error
-	localaddr, err := GetLocalTCPAddr(device, ipv6)
-	if err != nil {
-		logPrintln(1, err)
-		return
-	}
-
-	var handle *net.IPConn
-	if ipv6 {
-		if localaddr == nil {
-			logPrintln(1, "no IPv6 on", device)
-			return
-		}
-		handle, err = net.ListenIP("ip6:icmp", &net.IPAddr{IP: localaddr.IP, Zone: ""})
-	} else {
-		if localaddr == nil {
-			logPrintln(1, "no IPv4 on", device)
-			return
-		}
-		handle, err = net.ListenIP("ip4:icmp", &net.IPAddr{IP: localaddr.IP, Zone: ""})
-	}
-
-	if err != nil {
-		fmt.Printf("sockraw open failed: %v", err)
-		return
-	}
-	defer handle.Close()
-
-	var connInfo ConnectionInfo
-	data := make([]byte, 1500)
-	fakepayload := make([]byte, 1024)
-	df := gopacket.NilDecodeFeedback
-	for {
-		n, _, err := handle.ReadFrom(data)
-		if err != nil {
-			logPrintln(1, err)
-			continue
-		}
-		if len(data) < 8 || !(data[0] == 11 && data[1] == 0) {
-			continue
-		}
-
-		if ipv6 {
-			var icmp layers.ICMPv6
-			icmp.DecodeFromBytes(data[:n], df)
-			var ip layers.IPv6
-			if ip.DecodeFromBytes(icmp.Payload, df) == nil && ip.NextHeader == layers.IPProtocolTCP && ip.TrafficClass > 0 {
-				var tcp layers.TCP
-				if tcp.DecodeFromBytes(ip.Payload, df) == nil {
-					ip.TrafficClass = 0
-					connInfo.IP = &ip
-					connInfo.TCP = tcp
-					ttl := uint8(64)
-					if ip.TrafficClass > 4 {
-						ttl = ip.TrafficClass >> 2
-					}
-					ModifyAndSendPacket(&connInfo, fakepayload, HINT_TTL|HINT_WMD5, ttl, 2)
-					ModifyAndSendPacket(&connInfo, connInfo.TCP.Payload, HINT_TTL, 64, 1)
-				}
-			}
-		} else {
-			var icmp layers.ICMPv4
-			icmp.DecodeFromBytes(data[:n], df)
-			var ip layers.IPv4
-			if ip.DecodeFromBytes(icmp.Payload, df) == nil && ip.Protocol == layers.IPProtocolTCP && ip.TOS > 0 {
-				var tcp layers.TCP
-				if tcp.DecodeFromBytes(ip.Payload, df) == nil {
-					ip.TOS = 0
-					connInfo.IP = &ip
-					connInfo.TCP = tcp
-					ttl := uint8(64)
-					if ip.TOS > 4 {
-						ttl = ip.TOS >> 2
-					}
-					ModifyAndSendPacket(&connInfo, fakepayload, HINT_TTL|HINT_WMD5, ttl, 2)
-					ModifyAndSendPacket(&connInfo, connInfo.TCP.Payload, HINT_TTL, 64, 1)
-				}
-			}
-		}
-	}
-}
-
 func ConnectionMonitor(devices []string) bool {
-	if PassiveMode {
-		for i := 0; i < len(devices); i++ {
-			go ICMPMonitor(devices[i], false)
-		}
-	} else {
-		for i := 0; i < 65536; i++ {
-			ConnInfo4[i] = make(chan *ConnectionInfo)
-			ConnInfo6[i] = make(chan *ConnectionInfo)
-		}
-
-		for i := 0; i < len(devices); i++ {
-			go connectionMonitor(devices[i], false)
-			go connectionMonitor(devices[i], true)
-		}
-	}
-
-	return true
+	return false
 }
 
 func ModifyAndSendPacket(connInfo *ConnectionInfo, payload []byte, hint uint32, ttl uint8, count int) error {
@@ -287,12 +74,14 @@ func ModifyAndSendPacket(connInfo *ConnectionInfo, payload []byte, hint uint32, 
 
 	if hint&HINT_WMD5 != 0 {
 		tcpLayer.Options = []layers.TCPOption{
-			layers.TCPOption{19, 16, []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+			layers.TCPOption{
+				OptionType:   19,
+				OptionLength: 16,
+				OptionData:   []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+			},
 		}
 	} else if hint&HINT_WTIME != 0 {
-		tcpLayer.Options = []layers.TCPOption{
-			layers.TCPOption{8, 8, []byte{0, 0, 0, 0, 0, 0, 0, 0}},
-		}
+		tcpLayer.Options = connInfo.TCP.Options
 	}
 
 	if hint&HINT_NACK != 0 {
@@ -324,12 +113,12 @@ func ModifyAndSendPacket(connInfo *ConnectionInfo, payload []byte, hint uint32, 
 	var raddr net.IPAddr
 	switch ip := ipLayer.(type) {
 	case *layers.IPv4:
-		laddr = net.IPAddr{ip.SrcIP, ""}
-		raddr = net.IPAddr{ip.DstIP, ""}
+		laddr = net.IPAddr{IP: ip.SrcIP, Zone: ""}
+		raddr = net.IPAddr{IP: ip.DstIP, Zone: ""}
 		network = "ip4:tcp"
 	case *layers.IPv6:
-		laddr = net.IPAddr{ip.SrcIP, ""}
-		raddr = net.IPAddr{ip.DstIP, ""}
+		laddr = net.IPAddr{IP: ip.SrcIP, Zone: ""}
+		raddr = net.IPAddr{IP: ip.DstIP, Zone: ""}
 		network = "ip6:tcp"
 	}
 
@@ -412,7 +201,10 @@ func SendUDPPacket(laddr *net.UDPAddr, raddr *net.UDPAddr, payload []byte, ttl u
 		)
 	}
 
-	conn, err := net.DialIP(network, &net.IPAddr{laddr.IP, ""}, &net.IPAddr{raddr.IP, ""})
+	conn, err := net.DialIP(network,
+		&net.IPAddr{IP: laddr.IP, Zone: ""},
+		&net.IPAddr{IP: raddr.IP, Zone: ""},
+	)
 	if err != nil {
 		return err
 	}
@@ -438,4 +230,111 @@ func SendUDPPacket(laddr *net.UDPAddr, raddr *net.UDPAddr, payload []byte, ttl u
 	outgoingPacket := buffer.Bytes()
 	_, err = conn.Write(outgoingPacket)
 	return err
+}
+
+func DialConnInfo(laddr, raddr *net.TCPAddr, outbound *Outbound, payload []byte) (net.Conn, *ConnectionInfo, error) {
+	timeout := time.Millisecond * time.Duration(outbound.Timeout)
+	conn, err := DialWithOption(
+		laddr, raddr,
+		int(outbound.MaxTTL), int(outbound.MTU),
+		(outbound.Hint&HINT_TFO) != 0, (outbound.Hint&HINT_KEEPALIVE) != 0,
+		timeout)
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	laddr = conn.LocalAddr().(*net.TCPAddr)
+	f, err := conn.(*net.TCPConn).File()
+	if err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+	fd := int(f.Fd())
+	var connInfo ConnectionInfo
+
+	if raddr.IP.To4() == nil {
+		var ip layers.IPv6
+		ip.Version = 6
+		ip.TrafficClass = 5
+		ip.FlowLabel = 0
+		ip.Length = 0
+		ip.NextHeader = 6
+		ip.HopLimit = 64
+		ip.SrcIP = laddr.IP
+		ip.DstIP = raddr.IP
+		ip.HopByHop = nil
+
+		connInfo.IP = &ip
+	} else {
+		var ip layers.IPv4
+		ip.Version = 4
+		ip.IHL = 5
+		ip.TOS = 0
+		ip.Length = 0
+		ip.Id = 0
+		ip.Flags = 0
+		ip.FragOffset = 0
+		ip.TTL = 64
+		ip.Protocol = 6
+		ip.Checksum = 0
+		ip.SrcIP = laddr.IP
+		ip.DstIP = raddr.IP
+		ip.Options = nil
+		ip.Padding = nil
+
+		connInfo.IP = &ip
+	}
+
+	connInfo.TCP.DstPort = layers.TCPPort(raddr.Port)
+	connInfo.TCP.SrcPort = layers.TCPPort(laddr.Port)
+
+	timestamp, err := unix.GetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_TIMESTAMP)
+	var optionData [8]byte
+	binary.BigEndian.PutUint32(optionData[:], uint32(timestamp)-3600000)
+	connInfo.TCP.Options = []layers.TCPOption{
+		layers.TCPOption{
+			OptionType:   layers.TCPOptionKindTimestamps,
+			OptionLength: 8,
+			OptionData:   optionData[:],
+		},
+	}
+
+	err = unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_REPAIR, unix.TCP_REPAIR_ON)
+	if err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+
+	defer unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_REPAIR, unix.TCP_REPAIR_OFF)
+
+	err = unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_REPAIR_QUEUE, 2)
+	if err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+
+	seq, err := unix.GetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_QUEUE_SEQ)
+	if err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+	connInfo.TCP.Seq = uint32(seq) - 1
+
+	err = unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_REPAIR_QUEUE, 1)
+	if err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+
+	ack, err := unix.GetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_QUEUE_SEQ)
+	if err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+	connInfo.TCP.Ack = uint32(ack)
+
+	connInfo.TCP.Window = 32767
+
+	return conn, &connInfo, nil
 }

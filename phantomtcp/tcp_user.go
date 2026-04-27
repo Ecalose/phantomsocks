@@ -193,6 +193,16 @@ func (outbound *Outbound) dial(host string, port int, header []byte, offset int,
 	}
 }
 
+func DialConnInfo(laddr, raddr *net.TCPAddr, outbound *Outbound, payload []byte) (net.Conn, *ConnectionInfo, error) {
+	timeout := time.Millisecond * time.Duration(outbound.Timeout)
+	conn, err := DialWithOption(
+		laddr, raddr,
+		int(outbound.MaxTTL), int(outbound.MTU),
+		(outbound.Hint&HINT_TFO) != 0, (outbound.Hint&HINT_KEEPALIVE) != 0,
+		timeout)
+	return conn, nil, err
+}
+
 func (outbound *Outbound) Keep(client, conn net.Conn, connInfo *ConnectionInfo) {
 }
 
