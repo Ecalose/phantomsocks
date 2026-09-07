@@ -351,9 +351,15 @@ func GetQName(buf []byte) (string, int, int) {
 	if bufflen < 13 {
 		return "", 0, 0
 	}
+	const maxDNSNameLength = 255
+	nameStart := 12
 	length := buf[12]
 	off := 13
 	end := off + int(length)
+	wireNameLength := end - nameStart
+	if length > 63 || end > bufflen || wireNameLength >= maxDNSNameLength {
+		return "", 0, 0
+	}
 	qname := string(buf[off:end])
 	off = end
 
@@ -363,11 +369,19 @@ func GetQName(buf []byte) (string, int, int) {
 		}
 		length := buf[off]
 		off++
+		wireNameLength++
+		if length > 63 {
+			return "", 0, 0
+		}
 		if length == 0x00 {
+			if wireNameLength > maxDNSNameLength {
+				return "", 0, 0
+			}
 			break
 		}
 		end := off + int(length)
-		if end > bufflen {
+		wireNameLength += int(length)
+		if end > bufflen || wireNameLength >= maxDNSNameLength {
 			return "", 0, 0
 		}
 		qname += "." + string(buf[off:end])

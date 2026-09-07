@@ -19,14 +19,21 @@ import (
 const (
 	socks5RepSucceeded            byte = 0x00
 	socks5RepGeneralFailure       byte = 0x01
-	socks5RepNotAllowed             byte = 0x02
-	socks5RepNetworkUnreachable     byte = 0x03
-	socks5RepHostUnreachable        byte = 0x04
-	socks5RepConnectionRefused      byte = 0x05
-	socks5RepTTLExpired             byte = 0x06
-	socks5RepCommandNotSupported    byte = 0x07
-	socks5RepAddrTypeNotSupported   byte = 0x08
+	socks5RepNotAllowed           byte = 0x02
+	socks5RepNetworkUnreachable   byte = 0x03
+	socks5RepHostUnreachable      byte = 0x04
+	socks5RepConnectionRefused    byte = 0x05
+	socks5RepTTLExpired           byte = 0x06
+	socks5RepCommandNotSupported  byte = 0x07
+	socks5RepAddrTypeNotSupported byte = 0x08
 )
+
+const (
+	socksHandshakeTimeout = 10 * time.Second
+	socksDNSConcurrency   = 128
+)
+
+var errSocks5AddrTypeNotSupported = errors.New("socks5 address type not supported")
 
 func socks5ConnectReply() []byte {
 	return socks5AddrReply(socks5RepSucceeded, &net.TCPAddr{IP: net.IPv4zero})
@@ -554,6 +561,91 @@ func SocksBindWaitInbound(conn net.Conn) (*net.TCPAddr, error) {
 	return peer, nil
 }
 
+func socks5ServerNegotiate(conn net.Conn) error {
+	var nmethods [1]byte
+	if _, err := io.ReadFull(conn, nmethods[:]); err != nil {
+		return err
+	}
+
+	methods := make([]byte, int(nmethods[0]))
+	if len(methods) == 0 {
+		_, _ = conn.Write([]byte{0x05, 0xff})
+		return errors.New("socks5 greeting has no methods")
+	}
+	if _, err := io.ReadFull(conn, methods); err != nil {
+		return err
+	}
+
+	for _, method := range methods {
+		if method == 0x00 {
+			_, err := conn.Write([]byte{0x05, 0x00})
+			return err
+		}
+	}
+
+	_, err := conn.Write([]byte{0x05, 0xff})
+	if err != nil {
+		return err
+	}
+	return errors.New("no acceptable socks5 authentication method")
+}
+
+type socks5Request struct {
+	cmd  byte
+	host string
+	addr net.IP
+	port int
+}
+
+func socks5ReadRequest(conn net.Conn) (socks5Request, error) {
+	var request socks5Request
+	var header [4]byte
+	if _, err := io.ReadFull(conn, header[:]); err != nil {
+		return request, err
+	}
+	if header[0] != 0x05 {
+		return request, errors.New("invalid socks5 request version")
+	}
+	if header[2] != 0x00 {
+		return request, errors.New("invalid socks5 request reserved field")
+	}
+
+	request.cmd = header[1]
+	switch header[3] {
+	case 0x01: // IPv4
+		var body [6]byte
+		if _, err := io.ReadFull(conn, body[:]); err != nil {
+			return request, err
+		}
+		request.addr = net.IP(append([]byte(nil), body[:4]...))
+		request.port = int(binary.BigEndian.Uint16(body[4:6]))
+	case 0x03: // Domain
+		var length [1]byte
+		if _, err := io.ReadFull(conn, length[:]); err != nil {
+			return request, err
+		}
+		if length[0] == 0 {
+			return request, errors.New("empty socks5 domain")
+		}
+		body := make([]byte, int(length[0])+2)
+		if _, err := io.ReadFull(conn, body); err != nil {
+			return request, err
+		}
+		request.host = string(body[:len(body)-2])
+		request.port = int(binary.BigEndian.Uint16(body[len(body)-2:]))
+	case 0x04: // IPv6
+		var body [18]byte
+		if _, err := io.ReadFull(conn, body[:]); err != nil {
+			return request, err
+		}
+		request.addr = net.IP(append([]byte(nil), body[:16]...))
+		request.port = int(binary.BigEndian.Uint16(body[16:18]))
+	default:
+		return request, errSocks5AddrTypeNotSupported
+	}
+	return request, nil
+}
+
 func SocksProxy(client net.Conn) {
 	defer client.Close()
 
@@ -561,54 +653,49 @@ func SocksProxy(client net.Conn) {
 	host := ""
 	var addr net.IP
 	var port int
-	{
-		var b [1500]byte
-		n, err := client.Read(b[:])
+	var b [1500]byte
+	var reply []byte
+	var err error
+
+	if err = client.SetReadDeadline(time.Now().Add(socksHandshakeTimeout)); err != nil {
+		logPrintln(1, client.RemoteAddr(), err)
+		return
+	}
+	if _, err = io.ReadFull(client, b[:1]); err != nil {
+		logPrintln(1, client.RemoteAddr(), err)
+		return
+	}
+
+	if b[0] == 0x05 {
+		if err = socks5ServerNegotiate(client); err != nil {
+			logPrintln(1, client.RemoteAddr(), err)
+			return
+		}
+
+		var request socks5Request
+		request, err = socks5ReadRequest(client)
+		if err != nil {
+			if errors.Is(err, errSocks5AddrTypeNotSupported) {
+				_, _ = client.Write(socks5AddrReply(
+					socks5RepAddrTypeNotSupported,
+					&net.TCPAddr{IP: net.IPv4zero},
+				))
+			}
+			logPrintln(3, "invalid SOCKS5 request from", client.RemoteAddr(), err)
+			return
+		}
+		cmd, host, addr, port = request.cmd, request.host, request.addr, request.port
+		reply = socks5HandshakeReply(cmd, client)
+	} else {
+		n, readErr := client.Read(b[1:])
+		n++
+		err = readErr
 		if err != nil || n < 3 {
 			logPrintln(1, client.RemoteAddr(), err)
 			return
 		}
 
-		var reply []byte
-		if b[0] == 0x05 {
-			client.Write([]byte{0x05, 0x00})
-			n, err = client.Read(b[:4])
-			if err != nil || n != 4 {
-				return
-			}
-			cmd = b[1]
-
-			switch b[3] {
-			case 0x01: //IPv4
-				n, err = client.Read(b[:6])
-				if n < 6 {
-					return
-				}
-				addr = net.IP(b[:4])
-				port = int(binary.BigEndian.Uint16(b[4:6]))
-			case 0x03: //Domain
-				n, err = client.Read(b[:])
-				addrLen := b[0]
-				if n < int(addrLen+3) {
-					return
-				}
-				host = string(b[1 : addrLen+1])
-				port = int(binary.BigEndian.Uint16(b[n-2:]))
-			case 0x04: //IPv6
-				n, err = client.Read(b[:])
-				if n < 18 {
-					return
-				}
-				addr = net.IP(b[:16])
-				port = int(binary.BigEndian.Uint16(b[16:18]))
-			default:
-				// 0x08: address type not supported
-				logPrintln(3, "address type", b[0], "not supported from", client.RemoteAddr())
-				client.Write([]byte{5, 9, 0, 1, 0, 0, 0, 0, 0, 0})
-				return
-			}
-			reply = socks5HandshakeReply(cmd, client)
-		} else if b[0] == 0x04 {
+		if b[0] == 0x04 {
 			if n > 8 && b[1] == 1 {
 				userEnd := 8 + bytes.IndexByte(b[8:n], 0)
 				port = int(binary.BigEndian.Uint16(b[2:4]))
@@ -633,15 +720,18 @@ func SocksProxy(client net.Conn) {
 			logPrintln(3, "unknow from", client.RemoteAddr())
 			return
 		}
+	}
 
-		if err == nil && reply != nil {
-			_, err = client.Write(reply)
-		}
-
-		if err != nil {
-			logPrintln(1, err)
-			return
-		}
+	if err = client.SetReadDeadline(time.Time{}); err != nil {
+		logPrintln(1, client.RemoteAddr(), err)
+		return
+	}
+	if reply != nil {
+		_, err = client.Write(reply)
+	}
+	if err != nil {
+		logPrintln(1, err)
+		return
 	}
 
 	switch cmd {
@@ -1196,6 +1286,30 @@ func GetSocksUDPTarget(ip net.IP, host string) (string, *Outbound) {
 	return host, outbound
 }
 
+func socks5InterceptDNS(local *net.UDPConn, srcAddr *net.UDPAddr, header, request []byte) {
+	if len(header) == 0 || len(request) < 12 {
+		return
+	}
+
+	qname, _, end := GetQName(request)
+	if qname == "" || end == 0 {
+		return
+	}
+
+	dnsRequest := append([]byte(nil), request...)
+	_, response := NSRequest(dnsRequest, true)
+	if len(response) == 0 {
+		response = BuildServfail(dnsRequest)
+	}
+
+	packet := make([]byte, len(header)+len(response))
+	copy(packet, header)
+	copy(packet[len(header):], response)
+	if _, err := local.WriteToUDP(packet, srcAddr); err != nil {
+		logPrintln(1, "Socks(DNS):", err)
+	}
+}
+
 func SocksUDPProxy(address string) {
 	laddr, err := net.ResolveUDPAddr("udp", address)
 	if err != nil {
@@ -1212,6 +1326,7 @@ func SocksUDPProxy(address string) {
 	var ConnLock sync.Mutex
 	var ConnMap map[string]socksUDPSession = make(map[string]socksUDPSession)
 	var pendingMap map[string]*socksUDPPending = make(map[string]*socksUDPPending)
+	dnsSem := make(chan struct{}, socksDNSConcurrency)
 	data := make([]byte, quicUDPPacketSize+256)
 
 	for {
@@ -1262,6 +1377,24 @@ func SocksUDPProxy(address string) {
 
 		key := strings.Join([]string{srcAddr.String(), host, strconv.Itoa(port)}, ",")
 		payload := append([]byte(nil), data[hdrlen:n]...)
+
+		if port == 53 && len(header) != 0 {
+			select {
+			case dnsSem <- struct{}{}:
+				dnsAddr := &net.UDPAddr{
+					IP:   append(net.IP(nil), srcAddr.IP...),
+					Port: srcAddr.Port,
+					Zone: srcAddr.Zone,
+				}
+				go func() {
+					defer func() { <-dnsSem }()
+					socks5InterceptDNS(local, dnsAddr, header, payload)
+				}()
+			default:
+				logPrintln(3, "Socks(DNS): busy", srcAddr)
+			}
+			continue
+		}
 
 		ConnLock.Lock()
 		session, ok := ConnMap[key]
