@@ -29,8 +29,9 @@ const (
 )
 
 const (
-	socksHandshakeTimeout = 10 * time.Second
-	socksDNSConcurrency   = 128
+	socksHandshakeTimeout  = 10 * time.Second
+	socksDNSConcurrency    = 128
+	socksDNSMaxMessageSize = 1<<16 - 1
 )
 
 var errSocks5AddrTypeNotSupported = errors.New("socks5 address type not supported")
@@ -736,6 +737,10 @@ func SocksProxy(client net.Conn) {
 
 	switch cmd {
 	case 1: // CONNECT
+		if port == 53 {
+			socksInterceptDNSTCP(client)
+			return
+		}
 		tcpAddr := net.TCPAddr{IP: addr, Port: port}
 		tcp_redirect(client, &tcpAddr, host, nil)
 	case 2: // BIND
@@ -1287,19 +1292,13 @@ func GetSocksUDPTarget(ip net.IP, host string) (string, *Outbound) {
 }
 
 func socks5InterceptDNS(local *net.UDPConn, srcAddr *net.UDPAddr, header, request []byte) {
-	if len(header) == 0 || len(request) < 12 {
+	if len(header) == 0 {
 		return
 	}
 
-	qname, _, end := GetQName(request)
-	if qname == "" || end == 0 {
+	response, ok := processSocksDNSRequest(request)
+	if !ok {
 		return
-	}
-
-	dnsRequest := append([]byte(nil), request...)
-	_, response := NSRequest(dnsRequest, true)
-	if len(response) == 0 {
-		response = BuildServfail(dnsRequest)
 	}
 
 	packet := make([]byte, len(header)+len(response))
@@ -1308,6 +1307,66 @@ func socks5InterceptDNS(local *net.UDPConn, srcAddr *net.UDPAddr, header, reques
 	if _, err := local.WriteToUDP(packet, srcAddr); err != nil {
 		logPrintln(1, "Socks(DNS):", err)
 	}
+}
+
+func processSocksDNSRequest(request []byte) ([]byte, bool) {
+	if len(request) < 12 {
+		return nil, false
+	}
+
+	qname, _, _ := GetQName(request)
+	if qname == "" {
+		return nil, false
+	}
+
+	dnsRequest := append([]byte(nil), request...)
+	_, response := NSRequest(dnsRequest, true)
+	if len(response) == 0 {
+		response = BuildServfail(dnsRequest)
+	}
+	return response, true
+}
+
+func socksInterceptDNSTCP(client net.Conn) {
+	var length [2]byte
+	for {
+		if _, err := io.ReadFull(client, length[:]); err != nil {
+			return
+		}
+
+		requestLen := int(binary.BigEndian.Uint16(length[:]))
+		request := make([]byte, requestLen)
+		if _, err := io.ReadFull(client, request); err != nil {
+			return
+		}
+
+		response, ok := processSocksDNSRequest(request)
+		if !ok || len(response) > socksDNSMaxMessageSize {
+			return
+		}
+
+		if err := writeSocksDNSFrame(client, response); err != nil {
+			return
+		}
+	}
+}
+
+func writeSocksDNSFrame(client net.Conn, response []byte) error {
+	frame := make([]byte, len(response)+2)
+	binary.BigEndian.PutUint16(frame[:2], uint16(len(response)))
+	copy(frame[2:], response)
+
+	for len(frame) > 0 {
+		n, err := client.Write(frame)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		frame = frame[n:]
+	}
+	return nil
 }
 
 func SocksUDPProxy(address string) {
