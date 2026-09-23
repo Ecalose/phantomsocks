@@ -165,17 +165,7 @@ func tcp_redirect(client net.Conn, addr *net.TCPAddr, domain string, header []by
 		port := addr.Port
 
 		if domain == "" {
-			switch addr.IP[0] {
-			case 0x00:
-				index := int(binary.BigEndian.Uint16(addr.IP[14:16]))
-				if index >= len(Nose) {
-					logPrintln(3, index, "in", addr.IP, "out of range")
-					return
-				}
-				domain, outbound = GetDNSLie(index)
-				addr.IP = nil
-			case VirtualAddrPrefix:
-				index := int(binary.BigEndian.Uint16(addr.IP[2:4]))
+			if index, ok := parseFakeIPIndex(addr.IP); ok {
 				if index >= len(Nose) {
 					logPrintln(3, index, "in", addr.IP, "out of range")
 					return

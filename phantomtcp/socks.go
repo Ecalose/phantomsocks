@@ -1255,16 +1255,7 @@ func GetSocksUDPTarget(ip net.IP, host string) (string, *Outbound) {
 	var outbound *Outbound = nil
 
 	if host == "" && ip != nil {
-		switch ip[0] {
-		case 0x00:
-			index := int(binary.BigEndian.Uint16(ip[14:16]))
-			if index >= len(Nose) {
-				logPrintln(3, index, "in", ip, "out of range")
-				return "", nil
-			}
-			host, outbound = GetDNSLie(index)
-		case VirtualAddrPrefix:
-			index := int(binary.BigEndian.Uint16(ip[2:4]))
+		if index, ok := parseFakeIPIndex(ip); ok {
 			if index >= len(Nose) {
 				logPrintln(3, index, "in", ip, "out of range")
 				return "", nil

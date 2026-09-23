@@ -46,6 +46,21 @@ var DNSCache map[string]*DNSRecords = make(map[string]*DNSRecords)
 var Nose []DNSLie = []DNSLie{{"phantom.socks", nil}}
 var NoseLock sync.Mutex
 
+func parseFakeIPIndex(ip net.IP) (int, bool) {
+	switch ip[0] {
+	case 0:
+		if len(ip) == net.IPv6len {
+			return int(binary.BigEndian.Uint16(ip[14:16])), true
+		}
+	case VirtualAddrPrefix:
+		if len(ip) == net.IPv4len {
+			return int(binary.BigEndian.Uint16(ip[2:4])), true
+		}
+	}
+
+	return 0, false
+}
+
 func TCPlookup(request []byte, address string) ([]byte, error) {
 	data := make([]byte, 1024)
 	binary.BigEndian.PutUint16(data[:2], uint16(len(request)))
